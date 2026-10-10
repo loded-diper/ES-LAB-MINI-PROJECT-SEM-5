@@ -1,0 +1,7 @@
+/build/
+/Objects/
+/Listings/
+*.uvopt
+*.uvgui.*
+*.uvguix.*
+*.bak
