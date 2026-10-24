@@ -1,5 +1,5 @@
 /* Eight-LED adaptive traffic prototype, LPC1768 / Keil ARMCC (C90).
- * Application code is entirely in this file; use the vendor CMSIS startup
+ * Application includes traffic_io.h and board_config.h; use vendor startup
  * and system_LPC17xx.c. Timer0 and P0.4-P0.11 are reserved by this program.
  */
 #include <LPC17xx.h>
@@ -32,7 +32,8 @@ typedef enum {
     STATE_YELLOW = 2,
     STATE_ALL_RED = 3,
     STATE_IDLE = 4,
-    STATE_CLOCK_ERROR = 5
+    STATE_CLOCK_ERROR = 5,
+    STATE_EMERGENCY_GREEN = 6
 } TrafficState;
 
 /* Watch variables: road/scenario are ONE-BASED; road 0 means no active road.
@@ -65,6 +66,96 @@ static uint32_t phase_started_ms = 0;
 static uint32_t phase_duration_ms = 0;
 static uint32_t blink_started_ms = 0;
 static uint32_t signal_mask = RED_LED;
+
+/* Emergency requests are one-based; zero means no request. The round's
+ * served mask survives preemption; the interrupted road receives a fresh
+ * normal service later unless it had already completed clearance. */
+volatile int emergency_road = 0;
+volatile int emergency_active = 0;
+volatile int manual_mode = 0;
+static int emergency_cancel, emergency_clearance;
+static uint32_t emergency_started_ms;
+static int input_mode, edit_road, edit_value;
+static int pending_mode = -1;
+static int manual_density[4], staged_density[4];
+#include "traffic_io.h"
+
+static void traffic_key(char key)
+{
+    int i;
+    if (key == 'E') key = '*';
+    if (key == 'F') key = '#';
+    if (traffic_state == STATE_CLOCK_ERROR) return;
+    if (emergency_road || emergency_active || emergency_clearance) {
+        if (key == '#') emergency_cancel = 1;
+        return; /* Locked until cancellation and exit clearance finish. */
+    }
+    if (key == 'A') { input_mode = 1; return; }
+    if (input_mode == 1) {
+        if (key >= '1' && key <= '4') {
+            emergency_road = key - '0'; input_mode = 0;
+        } else if (key == '*') input_mode = 0;
+        return;
+    }
+    if (key == 'B') {
+        input_mode = 2; edit_road = edit_value = 0; return;
+    }
+    if (key == 'C') { pending_mode = 0; input_mode = 0; return; }
+    if (input_mode == 2) {
+        if (key >= '0' && key <= '9') {
+            if (edit_value * 10 + key - '0' <= 99)
+                edit_value = edit_value * 10 + key - '0';
+        } else if (key == '*') edit_value = 0;
+        else if (key == '#') {
+            staged_density[edit_road++] = edit_value; edit_value = 0;
+            if (edit_road == 4) {
+                for (i = 0; i < 4; ++i) manual_density[i] = staged_density[i];
+                pending_mode = 1; input_mode = 0;
+            }
+        }
+    }
+}
+
+static void text_line(int row, const char *text)
+{
+    int i;
+    for (i = 0; i < 16 && text[i]; ++i) lcd_text[row][i] = text[i];
+    for (; i < 16; ++i) lcd_text[row][i] = ' ';
+    lcd_text[row][16] = '\0';
+}
+static void text_number(int row, int col, int value)
+{
+    if (value < 0) value = 0;
+    if (value > 99) value = 99;
+    lcd_text[row][col] = (char)('0' + value / 10);
+    lcd_text[row][col + 1] = (char)('0' + value % 10);
+}
+static void ui_update(uint32_t now)
+{
+    segment_value = emergency_active || traffic_state == STATE_CLOCK_ERROR ?
+                    -1 : remaining_seconds;
+    buzzer_on = emergency_active && traffic_state == STATE_EMERGENCY_GREEN &&
+                (BUZZER_CONTINUOUS ||
+                 ((uint32_t)(now - emergency_started_ms) % 500UL < 250UL));
+    if (traffic_state == STATE_CLOCK_ERROR) {
+        text_line(0, "CLOCK ERROR"); text_line(1, "SAFE RED");
+    } else if (emergency_road || emergency_active) {
+        text_line(0, "EMERGENCY ROAD 0"); lcd_text[0][15] = (char)('0' + emergency_road);
+        text_line(1, emergency_active ? "GREEN  F CANCEL" : "WAIT CLEARANCE");
+    } else if (input_mode == 1) {
+        text_line(0, "EMERGENCY ROAD?"); text_line(1, "1-4  E BACK");
+    } else if (input_mode == 2) {
+        text_line(0, "SET ROAD 1: 00"); lcd_text[0][9] = (char)('1' + edit_road);
+        text_number(0, 12, edit_value); text_line(1, "F NEXT  E CLEAR");
+    } else {
+        text_line(0, "Road 0  Cars:00"); lcd_text[0][5] = (char)('0' + current_road);
+        text_number(0, 13, current_density);
+        text_line(1, traffic_state == STATE_GREEN ? "GREEN   Left:00s" :
+                     traffic_state == STATE_YELLOW ? "YELLOW  Left:00s" : "RED     Left:00s");
+        text_number(1, 13, remaining_seconds);
+        if (pending_mode >= 0) text_line(0, "INPUT QUEUED");
+    }
+}
 
 /* Logical 'on' mask is independent of electrical polarity. First turn off
  * every LED not wanted, then turn on the wanted LEDs: break before make.
@@ -192,7 +283,7 @@ static void phase_begin(int state, uint32_t duration, uint32_t now)
     phase_started_ms = now;
     phase_duration_ms = duration;
     remaining_seconds = (int)((duration + 999UL) / 1000UL);
-    if (state == STATE_GREEN) {
+    if (state == STATE_GREEN || state == STATE_EMERGENCY_GREEN) {
         signal_mask = GREEN_LED;
     } else if (state == STATE_YELLOW) {
         signal_mask = YELLOW_LED;
@@ -208,7 +299,12 @@ static void scenario_advance(uint32_t now)
     if (current_scenario > SCENARIO_COUNT) {
         current_scenario = 1;
     }
-    load_traffic_scenario();
+    if (pending_mode >= 0) { manual_mode = pending_mode; pending_mode = -1; }
+    if (manual_mode) {
+        int i;
+        for (i = 0; i < 4; ++i) traffic[i] = manual_density[i];
+        served_mask = 0;
+    } else load_traffic_scenario();
     scenario_blink_active = 1;
     blink_started_ms = now;
 }
@@ -235,6 +331,15 @@ static void start_next_road(uint32_t now)
     }
 }
 
+static void emergency_begin(uint32_t now)
+{
+    current_road = emergency_road;
+    current_density = traffic[current_road - 1];
+    emergency_active = 1;
+    emergency_started_ms = now;
+    phase_begin(STATE_EMERGENCY_GREEN, 0, now);
+}
+
 void traffic_controller(void)
 {
     uint32_t now;
@@ -246,6 +351,31 @@ void traffic_controller(void)
         scenario_blink_active = 0;
         display_update();
     }
+    if (traffic_state == STATE_CLOCK_ERROR) return;
+    if (emergency_cancel) {
+        emergency_cancel = 0; emergency_road = 0;
+        if (emergency_active) {
+            emergency_active = 0;
+            emergency_clearance = 1;
+            phase_begin(STATE_YELLOW, YELLOW_MS, now);
+        }
+    }
+    if (emergency_active) return; /* Indefinite green until explicit cancel. */
+    if (emergency_road) {
+        if (traffic_state == STATE_GREEN && current_road == emergency_road) {
+            emergency_begin(now); return;
+        }
+        if (traffic_state == STATE_GREEN) {
+            emergency_clearance = 1; /* Do not mark interrupted service complete. */
+            phase_begin(STATE_YELLOW, YELLOW_MS, now);
+            return;
+        }
+        if (traffic_state == STATE_IDLE || traffic_state == STATE_SELECT_ROAD) {
+            emergency_clearance = 1;
+            phase_begin(STATE_ALL_RED, CLEARANCE_MS, now);
+            return;
+        }
+    }
     if (traffic_state == STATE_SELECT_ROAD) {
         /* Boot scenario may be empty: show it rather than skipping it. */
         if (select_next_road() < 0) {
@@ -255,9 +385,6 @@ void traffic_controller(void)
         } else {
             start_next_road(now);
         }
-        return;
-    }
-    if (traffic_state == STATE_CLOCK_ERROR) {
         return;
     }
     /* Unsigned subtraction remains correct across the 32-bit tick wrap.
@@ -279,8 +406,11 @@ void traffic_controller(void)
         phase_begin(STATE_ALL_RED, CLEARANCE_MS, now);
         break;
     case STATE_ALL_RED:
-        served_mask |= 1UL << (current_road - 1);
-        start_next_road(now);
+        if (!emergency_clearance && current_road >= 1)
+            served_mask |= 1UL << (current_road - 1);
+        emergency_clearance = 0;
+        if (emergency_road) emergency_begin(now);
+        else start_next_road(now);
         break;
     case STATE_IDLE:
         start_next_road(now);
@@ -300,6 +430,7 @@ int main(void)
      */
     gpio_init();
     load_traffic_scenario();
+    peripherals_init();
     if (!timer_init()) {
         traffic_state = STATE_CLOCK_ERROR;
         /* Safe red/no road; debugger can inspect the invalid clock. */
@@ -309,6 +440,8 @@ int main(void)
     }
     for (;;) {
         traffic_controller();
+        ui_update(system_millis);
+        peripherals_tick(system_millis);
         __WFI(); /* Sleep until next interrupt; not a software delay. */
     }
 }

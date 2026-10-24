@@ -1,6 +1,14 @@
 # Adaptive traffic signal prototype — LPC1768
 
-The complete application is **[traffic.c](traffic.c)**. It uses all eight LEDs on
+The application is **[traffic.c](traffic.c)** with **[traffic_io.h](traffic_io.h)**
+and **[board_config.h](board_config.h)**.
+
+**Peripheral extension:** see [PERIPHERALS.md](PERIPHERALS.md) for emergency
+keypad controls, buzzer bursts, LCD status, seven-segment countdown, and the
+combined wiring plan derived from the uploaded trainer manual. Extra peripheral
+pins remain inactive until the wiring profile is configured.
+
+The baseline controller uses all eight LEDs on
 the ALS-SDA-ARMCTXM3-01, deterministic simulated densities, Timer0 interrupts,
 and a non-blocking foreground state machine. No external sensors or displays
 are required. The application uses Embedded C and `LPC17xx.h`; the standard
@@ -9,9 +17,8 @@ support files. The host tests are separate PC programs, never target sources.
 
 The latest eight-LED request governs this implementation. The uploaded pasted
 task supplies the original scenarios and timing bands; its older three-LED
-allocation is superseded. The synopsis's sensors, LCD, keypad, emergency mode
-and seven-segment display describe future extensions, not connected hardware
-for this phase. The lab manual supplies board and programming references.
+allocation is superseded. Sensors remain a future extension. LCD, keypad, emergency mode, buzzer and
+seven-segment support are implemented in the configurable peripheral extension. The lab manual supplies board and programming references.
 
 ## LED wiring and polarity
 
@@ -37,7 +44,8 @@ Printed page 23 specifies a 10-core FRC cable between **CNA and CNA1**; Appendix
 C, printed page 59, assigns CNA to **P0.4–P0.11**. Power off before connecting
 the cable. Match the keyed connectors and pin-1 markings; do not offset the
 plug or invent a pin order. Use only this LED connection for the demonstration.
-The program does not initialize LCD, keypad, sensors, UART or seven-segment pins.
+Without the peripheral profile, the program leaves LCD, keypad and seven-segment
+pins inactive. Sensors and UART remain unused.
 
 These eight physical LEDs need not be colored red/yellow/green: label the three
 corresponding positions with their logical signal names. This is one signal
@@ -226,7 +234,7 @@ sensor buffers. Watch updates are not an atomic snapshot of all variables.
 ## Create and build the Keil µVision4 project
 
 1. On the Windows lab computer, create a project folder, for example
-   `C:\ESLab\Traffic`. Copy `traffic.c` into it. Open **Keil µVision4**.
+   `C:\ESLab\Traffic`. Copy `traffic.c`, `traffic_io.h`, and `board_config.h` into it. Open **Keil µVision4**.
 2. Choose **Project → New µVision Project**, save `Traffic.uvproj` in that
    folder, select **NXP (founded by Philips) → LPC1768**, and click OK.
 3. Accept adding the device startup assembly when offered. Its usual name is
@@ -392,13 +400,8 @@ Files are created locally; no GitHub push or hardware flash is implied.
 
 ## Later extensions
 
-Replace the scenario snapshot loader with a consistent four-road sensor
-snapshot when real inputs exist; keep per-round served tracking. Choose a new
-sampling/policy interval explicitly so changing arrivals cannot continually
-preempt waiting roads. Add LCD/countdown display updates and keypad scans as
-short foreground tasks, with actual wiring and pin-conflict checks first.
-Multiplexed seven-segment output needs a separate periodic refresh resource
-and a verified connector plan. Add emergency requests through a state-machine
-path that completes safe yellow/red clearance before changing priority, then
-restores normal scheduling. None of these future modules is assumed present
-or implemented in the eight-LED phase.
+LCD, keypad density entry, emergency preemption, buzzer alerts and seven-segment
+countdown are implemented; see [PERIPHERALS.md](PERIPHERALS.md). Real sensors
+remain future work: supply a consistent four-road snapshot and preserve per-round
+served tracking. Add any future foreground tasks without blocking the millisecond
+peripheral refresh loop.

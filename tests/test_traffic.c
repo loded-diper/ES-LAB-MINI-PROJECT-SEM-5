@@ -5,7 +5,7 @@
 #include "support/LPC17xx.h"
 
 TestPincon test_pincon;
-TestGpio test_gpio;
+TestGpio test_gpio, test_extra_gpio[4];
 TestSc test_sc;
 TestTimer test_timer;
 uint32_t SystemCoreClock = 100000000UL;
@@ -85,6 +85,8 @@ static void reset_controller(int scenario)
     memset(&test_gpio, 0, sizeof(test_gpio));
     memset(&test_sc, 0, sizeof(test_sc));
     memset(&test_timer, 0, sizeof(test_timer));
+    emergency_road = emergency_active = emergency_cancel = emergency_clearance = 0;
+    manual_mode = input_mode = 0; pending_mode = -1;
     current_road = 0;
     current_density = 0;
     current_scenario = scenario;
@@ -234,12 +236,141 @@ static void test_late_poll_and_thresholds(void)
     assert(select_next_road() == -1);
 }
 
+
+static void advance_ms(unsigned long count)
+{
+    while (count--) tick();
+}
+static void test_emergency(void)
+{
+    int state;
+    reset_controller(1);
+    traffic_key('A'); traffic_key('2'); traffic_controller();
+    assert(traffic_state == STATE_YELLOW && current_road == 1);
+    advance_ms(1999); assert(traffic_state == STATE_YELLOW);
+    advance_ms(1); assert(traffic_state == STATE_ALL_RED);
+    advance_ms(999); assert(!emergency_active);
+    advance_ms(1); assert(emergency_active && current_road == 2);
+    assert(traffic_state == STATE_EMERGENCY_GREEN && signal_mask == GREEN_LED);
+    ui_update(system_millis);
+    assert(buzzer_on && segment_value == -1);
+    assert(strcmp(lcd_text[0], "EMERGENCY ROAD 2") == 0);
+    advance_ms(249); ui_update(system_millis); assert(buzzer_on);
+    advance_ms(1); ui_update(system_millis); assert(!buzzer_on || BUZZER_CONTINUOUS);
+    advance_ms(250); ui_update(system_millis); assert(buzzer_on);
+    traffic_key('A'); traffic_key('4'); assert(emergency_road == 2);
+    advance_ms(60000); assert(emergency_active && current_road == 2);
+    traffic_key('#'); traffic_controller(); ui_update(system_millis);
+    assert(!buzzer_on && traffic_state == STATE_YELLOW);
+    advance_ms(2000); assert(traffic_state == STATE_ALL_RED);
+    advance_ms(1000); assert(traffic_state == STATE_GREEN && current_road == 1);
+    assert(served_mask == 0); /* Interrupted road not lost. */
+    reset_controller(1);
+    traffic_key('A'); traffic_key('1'); traffic_controller();
+    assert(emergency_active && current_road == 1);
+    emergency_started_ms = UINT32_MAX - 100UL;
+    system_millis = 149; ui_update(system_millis);
+    assert(!buzzer_on || BUZZER_CONTINUOUS); /* 250ms across wrap. */
+    for (state = STATE_YELLOW; state <= STATE_ALL_RED; ++state) {
+        reset_controller(1);
+        phase_begin(state, state == STATE_YELLOW ? 2000 : 1000, system_millis);
+        advance_ms(100);
+        traffic_key('A'); traffic_key('4'); traffic_controller();
+        assert(traffic_state == state);
+        advance_ms(state == STATE_YELLOW ? 2899 : 899);
+        assert(!emergency_active);
+        advance_ms(1); assert(emergency_active && current_road == 4);
+    }
+    reset_controller(6);
+    traffic_key('A'); traffic_key('3'); traffic_controller();
+    assert(traffic_state == STATE_ALL_RED && current_road == 0);
+    advance_ms(1000); assert(emergency_active && current_road == 3);
+    reset_controller(1);
+    traffic_key('A'); traffic_key('2'); traffic_controller();
+    traffic_key('#'); traffic_controller();
+    advance_ms(3000); assert(!emergency_active && current_road == 1);
+    reset_controller(1);
+    traffic_state = STATE_CLOCK_ERROR;
+    traffic_key('A'); traffic_key('2'); traffic_controller();
+    assert(!emergency_road && traffic_state == STATE_CLOCK_ERROR);
+    puts("PASS emergency: clearance, hold, lock, cancel, resume, idle, wrap, fault");
+}
+static void test_manual_and_ui(void)
+{
+    int i;
+    reset_controller(1);
+    traffic_key('B'); traffic_key('9'); traffic_key('*'); traffic_key('2');
+    ui_update(system_millis); assert(strncmp(lcd_text[0], "SET ROAD 1: 02", 14) == 0);
+    traffic_key('#');
+    for (i = 0; i < 3; ++i) { traffic_key('0'); traffic_key('#'); }
+    assert(pending_mode == 1 && !manual_mode && traffic[0] == 8);
+    advance_ms(47000);
+    assert(manual_mode && current_road == 1 && current_density == 2);
+    ui_update(system_millis); assert(segment_value == 5);
+    assert(strcmp(lcd_text[0], "Road 1  Cars:02 ") == 0);
+    advance_ms(8000); assert(manual_mode && current_density == 2);
+    traffic_key('C'); advance_ms(8000); assert(!manual_mode);
+    assert(seg_pattern(0) == 0x3f && seg_pattern(8) == 0x7f);
+    assert(seg_pattern(-1) == 0x40);
+    puts("PASS manual density editing, round-boundary application, LCD and digits");
+}
+static void test_peripherals(void)
+{
+    uint32_t used[5] = {0,0,0,0,0};
+    const int conflict[2] = {50,50};
+    const int partial[2] = {50,-1};
+    unsigned long t;
+    int col, pin;
+    reset_controller(1); peripherals_init();
+    assert(!peripheral_config_error);
+    assert(!io_pin_valid(4) && !io_pin_valid(12) && !io_pin_valid(160));
+    assert(io_pin_valid(50));
+    key_candidate = -1; key_latched = 0; key_changed = 0;
+    keypad_sample(3, 0); keypad_sample(3, 23); assert(!input_mode);
+    keypad_sample(3, 24); assert(input_mode == 1);
+    input_mode = 0;
+    keypad_sample(3, 100); assert(!input_mode); /* No held-key repeats. */
+    keypad_sample(-1, 101); keypad_sample(-1, 125);
+    keypad_sample(-2, 126); keypad_sample(3, 127); keypad_sample(3, 160);
+    assert(!input_mode); /* Chords require release. */
+    if (lcd_enabled) {
+        /* High column inputs represent released keys in this register model. */
+        test_extra_gpio[1].FIOPIN = KEYPAD_ACTIVE_HIGH ? 0 : 0xf0;
+        ui_update(system_millis);
+        for (t = 1; t < 1000; ++t) peripherals_tick((uint32_t)t);
+        assert(lcd_boot == 8);
+        assert(memcmp(lcd_sent, lcd_text[0], 16) == 0);
+        assert(memcmp(lcd_sent + 16, lcd_text[1], 16) == 0);
+        assert((test_extra_gpio[0].FIODIR & (1UL << 18)) != 0);
+        /* Exercise the row scanner, rather than injecting a decoded key. */
+        input_mode = 0; key_latched = 0; key_candidate = -1;
+        for (t = 1000; t < 1040; ++t) {
+            for (col = 0; col < 4; ++col) {
+                pin = keypad_pins[col + 4];
+                if ((key_row == 0 && col == 3) == KEYPAD_ACTIVE_HIGH)
+                    io_ports[pin / 32]->FIOPIN |= 1UL << (pin % 32);
+                else io_ports[pin / 32]->FIOPIN &= ~(1UL << (pin % 32));
+            }
+            keypad_step((uint32_t)t);
+        }
+        assert(input_mode == 1); /* Row 0, column 3 is A in the test map. */
+    }
+    io_group(conflict, 2, used); assert(peripheral_config_error);
+    peripheral_config_error = 0;
+    io_group(partial, 2, used); assert(peripheral_config_error);
+    peripherals_init(); assert(!peripheral_config_error);
+    puts("PASS peripheral configuration, debounce/release, LCD transport");
+}
+
 int main(void)
 {
     test_complete_cycle();
     test_blink_and_wrap();
     test_gpio_timer_and_irq();
     test_late_poll_and_thresholds();
+    test_emergency();
+    test_manual_and_ui();
+    test_peripherals();
     printf("PASS polarity=%d: %lu phase/output checks; seven scenarios, "
            "countdowns, GPIO preservation, timer/IRQ, wrap and late polling\n",
            LED_ACTIVE_HIGH, checks);
