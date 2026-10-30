@@ -33,15 +33,15 @@ seven-segment support are implemented in the configurable peripheral extension. 
 | P0.10 | Road 4 |
 | P0.11 | Scenario change: one 250 ms ON pulse, then OFF |
 
-The manual's LED experiment (printed pages 24–25) labels `FIOSET` as turning an
-LED ON and `FIOCLR` as turning it OFF. This supports **active-high**, the default
+The manual explicitly states that a high controller output turns an LED on
+(printed page 33 / PDF page 34). This supports **active-high**, the default
 `LED_ACTIVE_HIGH=1`. The actual board has not been measured here. If your kit
 has inverted LED drivers, define `LED_ACTIVE_HIGH=0` in Keil's C/C++ **Define**
 field and rebuild/reflash. The same setting controls all eight LEDs. Never use
 the test header in `tests/support` as the target header.
 
-Printed page 23 specifies a 10-core FRC cable between **CNA and CNA1**; Appendix
-C, printed page 59, assigns CNA to **P0.4–P0.11**. Power off before connecting
+The LED demo specifies **CNA to CNA1** (printed page 49 / PDF page 50).
+The CNA table maps pins 1–8 to **P0.4–P0.11** (printed page 23 / PDF page 24). Power off before connecting
 the cable. Match the keyed connectors and pin-1 markings; do not offset the
 plug or invent a pin order. Use only this LED connection for the demonstration.
 Without the peripheral profile, the program leaves LCD, keypad and seven-segment
@@ -169,7 +169,8 @@ At 72 MHz CPU, MR0 is 18,000. At 12 MHz CPU, it is 3,000. Inspect the actual
 clock variables rather than assuming the default. Typical clocks divide
 exactly by 1000; unusual clocks use nearest-integer rounding, with tick error
 at most half a PCLK cycle. A zero/invalid tick count leaves safe red and
-`STATE_CLOCK_ERROR`. The oscillator value in the system clock file must match
+`STATE_CLOCK_ERROR`. Peripheral GPIO is initialized only after this check
+succeeds. On failure the LCD is not started; inspect the fault in the debugger. The oscillator value in the system clock file must match
 the physical board or all derived timing will be wrong.
 
 The NVIC routes `TIMER0_IRQn` to **`TIMER0_IRQHandler`**, the exact symbol used
@@ -291,8 +292,11 @@ a stopwatch without assuming a debugger or UART terminal.
 
 ## Flash Magic and physical trainer test
 
-The following connections/settings come from the manual's printed pages
-22–23. Follow the lab's board supervision and connector labels.
+The programming procedure is on printed pages 47–48 / PDF pages 48–49;
+connector descriptions are on printed pages 27–28 / PDF pages 28–29.
+These are programming settings, not proof of the correct run configuration.
+Before enabling the keypad, resolve the P2.10/ISP isolation described in
+[PERIPHERALS.md](PERIPHERALS.md). Follow the lab's board supervision.
 
 1. Power off; connect the LED FRC **CNA ↔ CNA1** and the board's supported
    power supply (**+5 V**, per the manual). Establish the manual's programming

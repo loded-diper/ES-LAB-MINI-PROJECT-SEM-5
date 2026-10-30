@@ -21,7 +21,7 @@
  */
 #define BOARD_PIN(port, bit) ((port) * 32 + (bit))
 #ifndef BOARD_LCD_PINS
-#define BOARD_LCD_PINS {-1,-1,-1,-1,-1,-1} /* RS,E,D4,D5,D6,D7; RW grounded */
+#define BOARD_LCD_PINS {-1,-1,-1,-1,-1,-1} /* RS,E,D4,D5,D6,D7; verify board RW is write-only */
 #endif
 #ifndef BOARD_SEGMENT_PINS
 #define BOARD_SEGMENT_PINS {-1,-1,-1,-1,-1,-1,-1,-1} /* a,b,c,d,e,f,g,dp */

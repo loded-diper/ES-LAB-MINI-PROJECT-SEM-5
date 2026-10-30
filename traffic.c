@@ -74,7 +74,8 @@ volatile int emergency_road = 0;
 volatile int emergency_active = 0;
 volatile int manual_mode = 0;
 static int emergency_cancel, emergency_clearance;
-static uint32_t emergency_started_ms;
+static uint32_t buzzer_phase_started_ms;
+static int buzzer_phase_on;
 static int input_mode, edit_road, edit_value;
 static int pending_mode = -1;
 static int manual_density[4], staged_density[4];
@@ -130,13 +131,27 @@ static void text_number(int row, int col, int value)
     lcd_text[row][col] = (char)('0' + value / 10);
     lcd_text[row][col + 1] = (char)('0' + value % 10);
 }
+static void buzzer_update(uint32_t now)
+{
+    uint32_t elapsed, phases;
+    buzzer_on = 0;
+    if (!emergency_active || traffic_state != STATE_EMERGENCY_GREEN) return;
+    /* Advance a rolling half-period, never the age of the whole emergency.
+     * No catch-up loop: skipped phases are handled in constant time. The
+     * millisecond service must not stop for an entire 32-bit timer period.
+     * Late polling cannot recreate missed physical transitions. */
+    elapsed = (uint32_t)(now - buzzer_phase_started_ms);
+    phases = elapsed / 250UL;
+    buzzer_phase_started_ms += phases * 250UL;
+    if (phases & 1UL) buzzer_phase_on = !buzzer_phase_on;
+    buzzer_on = BUZZER_CONTINUOUS || buzzer_phase_on;
+}
+
 static void ui_update(uint32_t now)
 {
     segment_value = emergency_active || traffic_state == STATE_CLOCK_ERROR ?
                     -1 : remaining_seconds;
-    buzzer_on = emergency_active && traffic_state == STATE_EMERGENCY_GREEN &&
-                (BUZZER_CONTINUOUS ||
-                 ((uint32_t)(now - emergency_started_ms) % 500UL < 250UL));
+    buzzer_update(now);
     if (traffic_state == STATE_CLOCK_ERROR) {
         text_line(0, "CLOCK ERROR"); text_line(1, "SAFE RED");
     } else if (emergency_road || emergency_active) {
@@ -336,7 +351,8 @@ static void emergency_begin(uint32_t now)
     current_road = emergency_road;
     current_density = traffic[current_road - 1];
     emergency_active = 1;
-    emergency_started_ms = now;
+    buzzer_phase_started_ms = now;
+    buzzer_phase_on = 1;
     phase_begin(STATE_EMERGENCY_GREEN, 0, now);
 }
 
@@ -423,25 +439,40 @@ void traffic_controller(void)
     }
 }
 
-int main(void)
+/* Boot-only initialization. Leave peripheral GPIO untouched on clock failure.
+ * Fault status is debugger-visible; LCD reporting would need a separate timer. */
+static int firmware_init(void)
 {
-    /* Standard vendor Reset_Handler calls SystemInit before main.
-     * Use the matching startup_LPC17xx.s + system_LPC17xx.c in Keil.
-     */
     gpio_init();
     load_traffic_scenario();
-    peripherals_init();
     if (!timer_init()) {
         traffic_state = STATE_CLOCK_ERROR;
-        /* Safe red/no road; debugger can inspect the invalid clock. */
+        return 0;
+    }
+    peripherals_init();
+    return 1;
+}
+
+static void firmware_step(void)
+{
+    traffic_controller();
+    ui_update(system_millis);
+    peripherals_tick(system_millis);
+}
+
+int main(void)
+{
+    /* Inspect the selected vendor startup: it must call SystemInit before
+     * main. Use matching startup_LPC17xx.s + system_LPC17xx.c in Keil. */
+    if (!firmware_init()) {
+        /* Safe red/no road. No keypad row or peripheral output was enabled.
+         * The LCD has not started and cannot show the clock error. */
         for (;;) {
             __WFI();
         }
     }
     for (;;) {
-        traffic_controller();
-        ui_update(system_millis);
-        peripherals_tick(system_millis);
+        firmware_step();
         __WFI(); /* Sleep until next interrupt; not a software delay. */
     }
 }

@@ -46,8 +46,13 @@ A passive transducer requires a carrier driver; it is not supported by DC enable
 
 Source: `ARM_LPC-1768_User_Manual (1) (1)_compressed.pdf`, uploaded to this
 repository at commit `fad154f` (read from Git without replacing local work).
-Printed pages 21–24 describe GPIO connectors; 30–31 LCD; 32 buzzer;
-35 keypad; 36 seven-segment; 37 spare connector; 44–46 demo connections.
+References use **printed page / PDF page**. GPIO connectors: 23–25/24–26;
+LCD: 30–31/31–32; buzzer: 32/33; keypad: 35/36; seven-segment: 36/37;
+spare connector: 37/38; relevant demos: 49–51/50–52.
+
+**Status: conditional wiring proposal, not a verified assembly instruction.**
+Leave `BOARD_TRAINER_WIRING=0` until the electrical questions below are resolved.
+Documented endpoints alone do not verify the complete interface or its voltages.
 
 The manual's examples are **separate experiments**. CNA cannot simultaneously
 feed CNA1 (LEDs), CNA2 (segments), and CNA5 (motor/relay/buzzer block) with
@@ -59,23 +64,33 @@ Do not connect the standalone demo cables in parallel.
 | --- | --- | --- |
 | Eight LEDs | CNA → CNA1, existing FRC | P0.4–P0.11 |
 | LCD | CND → CNAD, existing FRC | D4–D7=P0.23–26, RS=P0.27, E=P0.28 |
-| Segment bus | CNC pins 1–8 → CNA2 pins 1–8 | P0.15–P0.22 (a–g, decimal point) |
+| Segment bus | CNC pins 1–8 → CNA2 pins 1–8 | P0.15–P0.22 (segment bit order unverified) |
 | Digit selector | CN16 pins 1,2,3,4 → CNB2 pins 1,2,3,4 | P1.20,P1.21,P1.28,P1.29 (BCD A–D) |
 | Keypad | CNB → CNB3, existing FRC | P1.23–26 and P2.10–13 |
 | Buzzer control only | CN16 pin 5 → CNA5 pin 8 | P3.25 |
 
-Use an appropriate breakout cable for segment data: **CNC pin 9 is P2.13**, also
-used by the keypad, so leave it disconnected. Do not wire CNA5 pins 1–7, which
+Use an appropriate breakout cable for segment data. JP4 selects P2.13 routing:
+positions 1–2 enable CNB pin 8; positions 2–3 enable CNC pin 9 (24/25).
+Leave CNC pin 9 disconnected in this breakout; it is not needed for segment data. Do not wire CNA5 pins 1–7, which
 control motors and relays. CN16 pin 9 is VBAT, **not ground**; do not connect it
 to a peripheral ground. The on-board peripheral blocks already share board ground.
 Use connector labels/pin-1 marks and the manual, with power off while wiring.
 
 For the LCD, the manual specifies CN11, JP16 and JP5 shorted, and POT3 contrast.
-It lists CN11 pin 5 as NC; this implementation is write-only and never drives RW.
-For a separate generic HD44780 module, tie RW low per its module documentation.
-For CNB, JP4 positions 1–2 route P2.13 to CNB pin 8. P2.10 is also the ISP input:
-follow the board's run/program procedure, release keypad keys at reset, and ensure
-the programming circuitry is not holding a scanned row low during operation.
+The manual lists CN11 pin 5 as **NC**, not grounded (30/31). This driver requires
+write-only operation, but the board's RW treatment is unverified. Identify the
+LCD/module and its RW connection before use; do not ground an unidentified pin.
+The manual lists a +5 V LCD supply and 3.3 V controller supply. Verify logic
+thresholds and GPIO electrical characteristics, especially P0.27/P0.28 RS/E,
+and the U7/U12/buzzer interfaces against component datasheets or a schematic.
+
+P2.10 is an ISP input and a provisional keypad row. JP3 can connect it to ground;
+RTS also controls it (28/29, 33/34). Confirm JP3/programming-interface isolation
+and the reset/run voltage before driving this row high. Releasing keys is not
+sufficient. P2.10 may be sampled for ISP up to 3 ms after reset. The manual calls
+the handshake switch SW1 on 28/29 but SW21 on 27/28, 47/48 and 59/60; it calls
+SW1 the reset switch on 33/34. Resolve this contradiction against the actual
+board markings/schematic rather than treating those switches as interchangeable.
 
 **Details not supplied by the manual:** CNB3 row/column order, physical key labels
 by scan index, CNA2 segment bit order, U7 output-to-digit order and buzzer polarity.
@@ -93,6 +108,12 @@ After wiring and checking the above, set it to **1** in Keil's Defines or in
 in individual pin arrays for verified custom wiring. The driver rejects partial
 assignments, duplicate pins, nonexistent pins and conflicts with P0.4–P0.11 before
 configuring any peripheral. Inspect `peripheral_config_error` in the debugger.
+A zero error flag verifies only software pin assignments, not electrical wiring.
+
+The schematic, vendor `KEY_LCD`, `Seven_seg`, `AN_LCD` and `Buzzer` source, actual
+component markings/datasheets, and the selected Keil startup/system files are the
+next useful evidence. Host tests cannot determine those missing hardware facts.
+Do not add a carrier or assume one exists until the buzzer/driver is identified.
 
 ## Validation
 
@@ -110,3 +131,31 @@ buzzer polarity. Then verify emergency entry/exit clearance with a stopwatch,
 250ms buzzer bursts only during emergency green, locked road selection, and normal
 resumption. Display refresh, keypad scans and LCD transactions run non-blockingly
 from the millisecond foreground loop; do not add blocking tasks to that loop.
+
+## Review fixes and limits
+
+The buzzer envelope now advances a rolling 250 ms phase timestamp/state, so an
+emergency lasting longer than 2^32 milliseconds does not shorten a burst at wrap.
+Skipped phases are handled in constant time. The foreground must still run at
+least once per timer period; it normally runs every millisecond. Late polling
+stretches physical outputs: no software catch-up can reproduce missed transitions.
+Tests use a separate 64-bit reference timeline through two full timer periods,
+including dense checks at wrap and delayed updates. The old implementation failed
+this regression.
+
+Boot validates Timer0 before enabling any peripheral GPIO. If validation fails,
+LEDs remain red, the keypad is not configured, and `STATE_CLOCK_ERROR` is visible
+in the debugger. The LCD is not initialized and cannot display its fault text;
+LCD fault reporting would require an independent validated timing source.
+
+The host suite also observes requested buzzer pin levels through the complete
+foreground step and tests cancellation and restart. This is not an electrical
+measurement. LCD tests still primarily verify bookkeeping and text; they are not
+an independent LCD bus decoder. Synthetic pin maps do not verify the trainer
+map, ghost paths, brightness, startup glitches, or electrical contention.
+
+Keil/ARMCC linking and hardware execution remain unverified. Inspect the selected
+reset handler for `SystemInit` before main; do not add a second call blindly.
+Use matching vendor startup, system file, CMSIS headers and runtime. Check the
+actual clock configuration and linked memory layout instead of copying demo
+settings: the manual's example differs from this project's assumed startup path.

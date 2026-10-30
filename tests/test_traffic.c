@@ -18,6 +18,15 @@ void NVIC_SetPriority(int irq, uint32_t p) { assert(irq == 1); irq_priority = p;
 void NVIC_EnableIRQ(int irq) { assert(irq == 1); irq_enabled = 1; }
 void __WFI(void) {}
 
+static unsigned long peripheral_writes;
+static int observed_levels[160];
+static void observe_io(int pin, int high)
+{
+    assert(pin >= 0 && pin < 160);
+    observed_levels[pin] = high;
+    ++peripheral_writes;
+}
+#define IO_WRITE_OBSERVER(pin, high) observe_io(pin, high)
 #define main traffic_firmware_main
 #include "../traffic.c"
 #undef main
@@ -268,7 +277,7 @@ static void test_emergency(void)
     reset_controller(1);
     traffic_key('A'); traffic_key('1'); traffic_controller();
     assert(emergency_active && current_road == 1);
-    emergency_started_ms = UINT32_MAX - 100UL;
+    buzzer_phase_started_ms = UINT32_MAX - 100UL;
     system_millis = 149; ui_update(system_millis);
     assert(!buzzer_on || BUZZER_CONTINUOUS); /* 250ms across wrap. */
     for (state = STATE_YELLOW; state <= STATE_ALL_RED; ++state) {
@@ -295,6 +304,79 @@ static void test_emergency(void)
     assert(!emergency_road && traffic_state == STATE_CLOCK_ERROR);
     puts("PASS emergency: clearance, hold, lock, cancel, resume, idle, wrap, fault");
 }
+/* Independent 64-bit oracle, with bounded polling gaps, across more than
+ * two full 32-bit periods. Dense checks catch the old 46ms OFF interval. */
+static void test_long_buzzer(void)
+{
+    uint64_t elapsed, edge;
+    unsigned int period;
+    reset_controller(1);
+    traffic_key('A'); traffic_key('1'); traffic_controller();
+    elapsed = 0;
+    for (period = 1; period <= 2; ++period) {
+        edge = (uint64_t)period * ((uint64_t)UINT32_MAX + 1);
+        while (elapsed + 1000003UL < edge - 1000) {
+            elapsed += 1000003UL; /* Exercise odd/even skipped half periods. */
+            system_millis = (uint32_t)elapsed;
+            ui_update(system_millis);
+            assert(buzzer_on == (BUZZER_CONTINUOUS || elapsed % 500 < 250));
+        }
+        for (; elapsed < edge + 1000; ++elapsed) {
+            system_millis = (uint32_t)elapsed;
+            ui_update(system_millis);
+            assert(buzzer_on == (BUZZER_CONTINUOUS || elapsed % 500 < 250));
+        }
+    }
+    puts("PASS buzzer: two full timer periods, boundary waveform, delayed polling");
+}
+
+static void test_boot_and_buzzer_output(void)
+{
+    TestGpio before[4];
+    unsigned int i;
+    reset_controller(1);
+    traffic_state = STATE_SELECT_ROAD;
+    current_road = current_density = 0;
+    SystemCoreClock = 0;
+    memcpy(before, test_extra_gpio, sizeof(before));
+    peripheral_writes = 0;
+    assert(!firmware_init());
+    assert(traffic_state == STATE_CLOCK_ERROR && !irq_enabled);
+    assert(peripheral_writes == 0);
+    assert(memcmp(before, test_extra_gpio, sizeof(before)) == 0);
+    assert(logical_leds() == RED_LED);
+
+    reset_controller(1);
+    assert(firmware_init());
+    if (buzzer_pin[0] < 0) return;
+    assert(buzzer_enabled);
+    assert(observed_levels[buzzer_pin[0]] == !BUZZER_ACTIVE_HIGH);
+    /* Released columns, so scanning does not create unrelated events. */
+    for (i = 0; i < 4; ++i) test_extra_gpio[i].FIOPIN =
+        KEYPAD_ACTIVE_HIGH ? 0 : UINT32_MAX;
+    traffic_key('A'); traffic_key('1');
+    ++system_millis; firmware_step();
+    assert(observed_levels[buzzer_pin[0]] == BUZZER_ACTIVE_HIGH);
+    system_millis += 249; firmware_step();
+    assert(observed_levels[buzzer_pin[0]] == BUZZER_ACTIVE_HIGH);
+    ++system_millis; firmware_step();
+    assert(observed_levels[buzzer_pin[0]] ==
+           (BUZZER_CONTINUOUS ? BUZZER_ACTIVE_HIGH : !BUZZER_ACTIVE_HIGH));
+    system_millis += 250; firmware_step();
+    assert(observed_levels[buzzer_pin[0]] == BUZZER_ACTIVE_HIGH);
+    traffic_key('F');
+    ++system_millis; firmware_step();
+    assert(traffic_state == STATE_YELLOW);
+    assert(observed_levels[buzzer_pin[0]] == !BUZZER_ACTIVE_HIGH);
+    /* A new emergency resets the envelope to ON. */
+    system_millis += 2000; firmware_step();
+    system_millis += 1000; firmware_step();
+    traffic_key('A'); traffic_key('1');
+    ++system_millis; firmware_step();
+    assert(observed_levels[buzzer_pin[0]] == BUZZER_ACTIVE_HIGH);
+    puts("PASS boot failure leaves peripheral pins untouched; full-loop buzzer output/cancel");
+}
+
 static void test_manual_and_ui(void)
 {
     int i;
@@ -369,8 +451,10 @@ int main(void)
     test_gpio_timer_and_irq();
     test_late_poll_and_thresholds();
     test_emergency();
+    test_long_buzzer();
     test_manual_and_ui();
     test_peripherals();
+    test_boot_and_buzzer_output();
     printf("PASS polarity=%d: %lu phase/output checks; seven scenarios, "
            "countdowns, GPIO preservation, timer/IRQ, wrap and late polling\n",
            LED_ACTIVE_HIGH, checks);

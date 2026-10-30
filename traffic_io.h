@@ -51,10 +51,15 @@ static int io_pin_valid(int pin)
            (port == 4 && (bit == 28 || bit == 29));
 }
 
+/* Optional host observer records requested output levels, not hardware reads. */
+#ifndef IO_WRITE_OBSERVER
+#define IO_WRITE_OBSERVER(pin, high) ((void)0)
+#endif
 static void io_write(int pin, int high)
 {
     if (high) io_ports[pin / 32]->FIOSET = 1UL << (pin % 32);
     else io_ports[pin / 32]->FIOCLR = 1UL << (pin % 32);
+    IO_WRITE_OBSERVER(pin, high);
 }
 static void io_direction(int pin, int output)
 {
